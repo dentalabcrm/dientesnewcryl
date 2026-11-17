@@ -139,6 +139,8 @@
 
     <div class="borrador-info">
       <span>💾 Lo que anotás se guarda solo en este dispositivo — podés cerrar y volver con el mismo link.</span>
+      <button onclick="document.getElementById('input-pdf-pedido').click()" title="Cargá un PDF que descargaste de esta página para seguir agregando">📄 Cargar PDF del pedido</button>
+      <input type="file" id="input-pdf-pedido" accept="application/pdf,.pdf" style="display:none" onchange="if(this.files[0]) cargarDesdePDF(this.files[0]); this.value='';">
       <button onclick="borrarTodoYEmpezar()">🗑 Borrar todo y empezar de nuevo</button>
     </div>
     <div id="diag-borrador" style="font-size:10.5px;color:var(--text3);margin:-8px 0 14px 4px;font-family:'DM Mono',monospace;"></div>
@@ -438,6 +440,73 @@ async function cargarPedidoParaEditar(){
   }
 }
 
+// ── Cargar un PDF descargado de esta página (botón o arrastrándolo) ──
+// El PDF lleva los datos del pedido en sus propiedades: se leen, se cargan en la planilla y se guardan
+// como borrador, así el cliente puede seguir agregando.
+async function cargarDesdePDF(file){
+  try {
+    if (!file || !/\.pdf$/i.test(file.name || '') && file.type !== 'application/pdf') { alert('Ese archivo no es un PDF.'); return; }
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let txt = ''; for (let i = 0; i < buf.length; i += 0x8000) txt += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    const m = txt.match(/DLDIENTES:([A-Za-z0-9+\/=]+):DLFIN/);
+    if (!m) { alert('Este PDF no tiene los datos del pedido.\n\nSolo se pueden cargar los PDF descargados con el botón de esta página (a partir de esta versión).'); return; }
+    const datos = JSON.parse(decodeURIComponent(escape(atob(m[1]))));
+    if (datos.marca && datos.marca !== MARCA.key) {
+      alert(`Este PDF es de un pedido de ${datos.marca === 'acritone' ? 'Acritone' : datos.marca === 'newcryl' ? 'NewCryl' : datos.marca}.\nAbrilo en el link de esa marca.`);
+      return;
+    }
+    const hayAlgo = recolectarDatos().total > 0;
+    if (hayAlgo && !confirm('Ya hay cantidades anotadas. ¿Reemplazarlas por las del PDF?')) return;
+    MARCA.secciones.forEach(sec => sec.rows.forEach((row, rIdx) => MARCA.cols.forEach((c, cIdx) => {
+      const el = document.getElementById(inputId(sec.key, rIdx, cIdx)); if (el) el.value = '';
+    })));
+    let n = 0;
+    MARCA.secciones.forEach(sec => {
+      const filas = (datos.secciones || {})[sec.key] || {};
+      sec.rows.forEach((row, rIdx) => {
+        const cols = filas[rowId(row)]; if (!cols) return;
+        MARCA.cols.forEach((c, cIdx) => {
+          const v = cols[`${c.code} · ${c.shade}`];
+          if (v) { const el = document.getElementById(inputId(sec.key, rIdx, cIdx)); if (el) { el.value = v; n++; } }
+        });
+      });
+    });
+    const cl = datos.cliente || {};
+    if (cl.nombre) document.getElementById('cf-nombre').value = cl.nombre;
+    if (cl.email) document.getElementById('cf-email').value = cl.email;
+    if (cl.tel) document.getElementById('cf-tel').value = cl.tel;
+    calcularTotales();
+    guardarBorrador();
+    const diag = document.getElementById('diag-borrador');
+    if (diag) diag.textContent = `📄 Cargado desde el PDF "${file.name}": ${n} celda(s). Ya podés agregar lo que falte.`;
+    try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) {}
+  } catch (e) {
+    alert('No se pudo leer el PDF: ' + e.message);
+  }
+}
+window.cargarDesdePDF = cargarDesdePDF;
+(function(){
+  let capa = null, cont = 0;
+  const mostrar = (si) => {
+    if (si && !capa) {
+      capa = document.createElement('div');
+      capa.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(28,98,201,.12);border:3px dashed ' + (MARCA.accent || '#1c62c9') + ';display:flex;align-items:center;justify-content:center;pointer-events:none;font:700 20px "DM Sans",sans-serif;color:' + (MARCA.accent || '#1c62c9');
+      capa.innerHTML = '<div style="background:#fff;padding:18px 26px;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.15)">📄 Soltá el PDF del pedido para cargarlo</div>';
+      document.body.appendChild(capa);
+    } else if (!si && capa) { capa.remove(); capa = null; }
+  };
+  const esArchivo = e => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  document.addEventListener('dragenter', e => { if (!esArchivo(e)) return; e.preventDefault(); cont++; mostrar(true); });
+  document.addEventListener('dragover', e => { if (!esArchivo(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  document.addEventListener('dragleave', e => { if (!esArchivo(e)) return; cont = Math.max(0, cont - 1); if (!cont) mostrar(false); });
+  document.addEventListener('drop', e => {
+    if (!esArchivo(e)) return;
+    e.preventDefault(); cont = 0; mostrar(false);
+    const f = Array.from(e.dataTransfer.files || []).find(x => /\.pdf$/i.test(x.name) || x.type === 'application/pdf');
+    if (f) cargarDesdePDF(f); else alert('Soltá un archivo PDF del pedido.');
+  });
+})();
+
 // ── Descargar PDF del pedido (mismo formato que el "PDF de dientes" del CRM) ──
 const TEAL = [49, 133, 155];
 const LABEL_NEWCRYL = { ant_sup: 'Anteriores Superiores', ant_inf: 'Anteriores Inferiores', post_sup: 'Posteriores Superiores', post_inf: 'Posteriores Inferiores' };
@@ -528,6 +597,15 @@ function descargarPedidoPDF(){
   doc.text(`TOTAL JUEGOS DE DIENTES: ${totalMarca}`, pageW - margin, y, { align: 'right' });
 
   const nombreArchivo = `Pedido_Dientes_Newcryl_${(nombre || 'cliente').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+  // Se guardan los datos del pedido DENTRO del PDF (en sus propiedades), para poder volver a cargarlo
+  // arrastrándolo a esta página y seguir agregando.
+  try {
+    const datosPdf = { v: 1, marca: MARCA.key, secciones: recolectarDatos().secciones, cliente: {
+      nombre: document.getElementById('cf-nombre')?.value || '', email: document.getElementById('cf-email')?.value || '',
+      tel: document.getElementById('cf-tel')?.value || '' } };
+    doc.setProperties({ title: 'Pedido Dientes ' + MARCA.label, subject: 'Pedido de dientes Dentalab',
+      keywords: 'DLDIENTES:' + btoa(unescape(encodeURIComponent(JSON.stringify(datosPdf)))) + ':DLFIN' });
+  } catch (e) {}
   doc.save(nombreArchivo);
 }
 window.descargarPedidoPDF = descargarPedidoPDF;
